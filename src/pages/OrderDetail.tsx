@@ -1,14 +1,24 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ordersApi } from '@/services/api';
 import { format } from 'date-fns';
+import QRCode from 'qrcode';
+
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,7 +30,9 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+
 import { useToast } from '@/hooks/use-toast';
+
 import {
   ArrowLeft,
   Package,
@@ -35,7 +47,11 @@ import {
   Truck,
   ChefHat,
   PackageCheck,
+  QrCode as QrCodeIcon,
+  Copy,
 } from 'lucide-react';
+
+/* ---------------- STATUS CONFIG ---------------- */
 
 const statusSteps = [
   { id: 'pending', label: 'Pending', icon: Clock },
@@ -63,11 +79,30 @@ const statusLabels: Record<string, string> = {
   cancelled: 'Cancelled',
 };
 
+const paymentMethodLabels: Record<string, string> = {
+  cash: 'Cash on Delivery',
+  card: 'Credit/Debit Card',
+  upi: 'UPI',
+};
+
+/* ---------------- RAZORPAY LOADER ---------------- */
+
+const loadRazorpayScript = (): Promise<boolean> => {
+  return new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+};
+
+/* ---------------- STATUS TIMELINE ---------------- */
+
 function StatusTimeline({ currentStatus }: { currentStatus: string }) {
   const currentIndex = statusSteps.findIndex((s) => s.id === currentStatus);
-  const isCancelled = currentStatus === 'cancelled';
 
-  if (isCancelled) {
+  if (currentStatus === 'cancelled') {
     return (
       <div className="flex items-center justify-center gap-2 rounded-lg bg-destructive/10 p-4">
         <XCircle className="h-6 w-6 text-destructive" />
@@ -77,72 +112,290 @@ function StatusTimeline({ currentStatus }: { currentStatus: string }) {
   }
 
   return (
-    <div className="relative">
-      <div className="flex items-center justify-between">
-        {statusSteps.map((step, index) => {
-          const isCompleted = index <= currentIndex;
-          const isCurrent = index === currentIndex;
+    <div className="flex items-center justify-between">
+      {statusSteps.map((step, index) => {
+        const Icon = step.icon;
+        const isCompleted = index <= currentIndex;
 
-          return (
+        return (
+          <div key={step.id} className="flex flex-1 flex-col items-center">
             <div
-              key={step.id}
-              className="relative flex flex-1 flex-col items-center"
+              className={`flex h-10 w-10 items-center justify-center rounded-full ${
+                isCompleted ? 'bg-primary text-white' : 'bg-muted'
+              }`}
             >
-              {index > 0 && (
-                <div
-                  className={`absolute left-0 top-5 h-0.5 w-full -translate-x-1/2 ${
-                    index <= currentIndex ? 'bg-primary' : 'bg-border'
-                  }`}
-                />
-              )}
-              <div
-                className={`relative z-10 flex h-10 w-10 items-center justify-center rounded-full transition-all ${
-                  isCompleted
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-muted text-muted-foreground'
-                } ${isCurrent ? 'ring-4 ring-primary/20' : ''}`}
-              >
-                <step.icon className="h-5 w-5" />
-              </div>
-              <span
-                className={`mt-2 text-center text-xs font-medium ${
-                  isCompleted ? 'text-foreground' : 'text-muted-foreground'
-                }`}
-              >
-                {step.label}
-              </span>
+              <Icon className="h-5 w-5" />
             </div>
-          );
-        })}
-      </div>
+            <span className="mt-2 text-xs">{step.label}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
+
+/* ---------------- MAIN COMPONENT ---------------- */
 
 export default function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
   const [cancelReason, setCancelReason] = useState('');
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+  const [showQRDialog, setShowQRDialog] = useState(false);
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
+  const [upiLink, setUpiLink] = useState('');
 
-  const { data, isLoading } = useQuery({
+  /* ---------- FETCH ORDER ---------- */
+
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ['order', id],
     queryFn: () => ordersApi.getById(id!),
     enabled: !!id,
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    refetchInterval: 30000,
   });
 
   const order = data?.order;
+
+  /* ---------- HELPER: CHECK PAYMENT STATUS ---------- */
+  
+  const isPaymentCompleted = (status: string | undefined) => {
+    if (!status) return false;
+    return status === 'completed' || status === 'paid';
+  };
+
+  /* ---------- CHECK IF PAYMENT NEEDED ---------- */
+  
+  const needsPayment = order && 
+    (order.paymentMethod === 'card' || order.paymentMethod === 'upi') &&
+    order.paymentStatus === 'pending';
+
+  /* ---------- SAFE ADDRESS FORMAT ---------- */
+
+  const formattedAddress = order?.deliveryAddress
+    ? [
+        order.deliveryAddress.street,
+        order.deliveryAddress.city,
+        order.deliveryAddress.state,
+        order.deliveryAddress.zipCode,
+      ]
+        .filter(Boolean)
+        .join(', ')
+    : 'Address not available';
+
+  /* ---------- GENERATE UPI QR CODE ---------- */
+
+  const generateUPIQR = async () => {
+    if (!order) return;
+
+    try {
+      // UPI payment link format
+      const upiId = '8767791904@upi'; // Replace with your actual UPI ID
+      const name = 'FoodDash';
+      const amount = order.totalAmount.toFixed(2);
+      const transactionNote = `Order ${order.orderNumber}`;
+      
+      const upiString = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(name)}&am=${amount}&tn=${encodeURIComponent(transactionNote)}`;
+      
+      setUpiLink(upiString);
+
+      // Generate QR code
+      const qrDataUrl = await QRCode.toDataURL(upiString, {
+        width: 300,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF',
+        },
+      });
+
+      setQrCodeUrl(qrDataUrl);
+      setShowQRDialog(true);
+    } catch (error) {
+      console.error('Error generating QR code:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to generate QR code',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  /* ---------- COPY UPI LINK ---------- */
+
+  const copyUPILink = () => {
+    navigator.clipboard.writeText(upiLink);
+    toast({
+      title: 'Copied!',
+      description: 'UPI link copied to clipboard',
+    });
+  };
+
+  /* ---------- HANDLE PAYMENT ---------- */
+
+  const handlePayNow = async () => {
+    if (!order) return;
+
+    // If UPI, show QR code option
+    if (order.paymentMethod === 'upi') {
+      const choice = confirm('Choose payment method:\nOK = Razorpay UPI\nCancel = Show QR Code');
+      
+      if (!choice) {
+        generateUPIQR();
+        return;
+      }
+    }
+
+    try {
+      setIsProcessingPayment(true);
+
+      // Load Razorpay script
+      const scriptLoaded = await loadRazorpayScript();
+      if (!scriptLoaded) {
+        toast({
+          title: 'Error',
+          description: 'Failed to load payment gateway',
+          variant: 'destructive',
+        });
+        setIsProcessingPayment(false);
+        return;
+      }
+
+      console.log('Creating payment order for:', order._id, 'Amount:', order.totalAmount);
+
+      // Create Razorpay order
+      const response = await fetch('http://localhost:5000/api/payment/create-order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+        },
+        body: JSON.stringify({
+          amount: order.totalAmount,
+          orderId: order._id,
+        }),
+      });
+
+      const responseText = await response.text();
+      console.log('Payment response:', responseText);
+
+      let paymentData;
+      try {
+        paymentData = JSON.parse(responseText);
+      } catch (e) {
+        console.error('Failed to parse response:', responseText);
+        throw new Error('Invalid response from server');
+      }
+      
+      if (!paymentData.success) {
+        throw new Error(paymentData.message || 'Failed to create payment order');
+      }
+
+      // Get user data from localStorage
+      const userData = JSON.parse(localStorage.getItem('user') || '{}');
+
+      // Razorpay payment options
+      const options = {
+        key: paymentData.key,
+        amount: paymentData.order.amount,
+        currency: paymentData.order.currency,
+        name: 'FoodDash',
+        description: `Order #${order.orderNumber}`,
+        order_id: paymentData.order.id,
+        handler: async (response: any) => {
+          // Payment successful - verify on backend
+          try {
+            const verifyResponse = await fetch('http://localhost:5000/api/payment/verify', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('token')}`,
+              },
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                orderId: order._id,
+              }),
+            });
+
+            const verifyData = await verifyResponse.json();
+
+            if (verifyData.success) {
+              toast({
+                title: 'Payment Successful!',
+                description: 'Your order has been confirmed',
+              });
+              
+              // Refresh order data
+              refetch();
+              queryClient.invalidateQueries({ queryKey: ['orders'] });
+            } else {
+              throw new Error('Payment verification failed');
+            }
+          } catch (error) {
+            toast({
+              title: 'Verification Failed',
+              description: 'Payment verification failed. Please contact support.',
+              variant: 'destructive',
+            });
+          } finally {
+            setIsProcessingPayment(false);
+          }
+        },
+        prefill: {
+          name: userData.name || '',
+          email: userData.email || '',
+          contact: userData.phone || '',
+        },
+        theme: {
+          color: '#FF6B6B',
+        },
+        modal: {
+          ondismiss: () => {
+            toast({
+              title: 'Payment Cancelled',
+              description: 'You cancelled the payment',
+            });
+            setIsProcessingPayment(false);
+          },
+        },
+      };
+
+      const razorpay = new (window as any).Razorpay(options);
+      
+      razorpay.on('payment.failed', (response: any) => {
+        toast({
+          title: 'Payment Failed',
+          description: response.error.description || 'Payment was not completed',
+          variant: 'destructive',
+        });
+        setIsProcessingPayment(false);
+      });
+
+      razorpay.open();
+    } catch (error) {
+      console.error('Payment error:', error);
+      toast({
+        title: 'Payment Error',
+        description: error instanceof Error ? error.message : 'Failed to initiate payment',
+        variant: 'destructive',
+      });
+      setIsProcessingPayment(false);
+    }
+  };
+
+  /* ---------- CANCEL ORDER ---------- */
 
   const canCancel = order && ['pending', 'confirmed'].includes(order.status);
 
   const handleCancel = async () => {
     if (!cancelReason.trim()) {
       toast({
-        title: 'Please provide a reason',
-        description: 'A cancellation reason is required',
+        title: 'Reason required',
         variant: 'destructive',
       });
       return;
@@ -151,16 +404,15 @@ export default function OrderDetail() {
     try {
       setIsCancelling(true);
       await ordersApi.cancel(id!, cancelReason);
+
       queryClient.invalidateQueries({ queryKey: ['order', id] });
       queryClient.invalidateQueries({ queryKey: ['orders'] });
+
+      toast({ title: 'Order cancelled' });
+    } catch (err: any) {
       toast({
-        title: 'Order cancelled',
-        description: 'Your order has been cancelled successfully',
-      });
-    } catch (error) {
-      toast({
-        title: 'Failed to cancel order',
-        description: error instanceof Error ? error.message : 'Something went wrong',
+        title: 'Failed to cancel',
+        description: err.message,
         variant: 'destructive',
       });
     } finally {
@@ -168,100 +420,83 @@ export default function OrderDetail() {
     }
   };
 
+  /* ---------- LOADING ---------- */
+
   if (isLoading) {
     return (
       <div className="container py-8">
-        <Skeleton className="mb-6 h-8 w-32" />
-        <div className="grid gap-6 lg:grid-cols-3">
-          <div className="space-y-6 lg:col-span-2">
-            <Card>
-              <CardContent className="p-6">
-                <Skeleton className="mb-4 h-8 w-48" />
-                <Skeleton className="h-24 w-full" />
-              </CardContent>
-            </Card>
-          </div>
-          <div>
-            <Card>
-              <CardContent className="p-6">
-                <Skeleton className="mb-4 h-6 w-32" />
-                <Skeleton className="h-40 w-full" />
-              </CardContent>
-            </Card>
-          </div>
-        </div>
+        <Skeleton className="h-8 w-40 mb-6" />
+        <Skeleton className="h-64 w-full mb-6" />
+        <Skeleton className="h-32 w-full" />
       </div>
     );
   }
 
+  /* ---------- NOT FOUND ---------- */
+
   if (!order) {
     return (
-      <div className="container py-16 text-center">
-        <Package className="mx-auto mb-4 h-16 w-16 text-muted-foreground/50" />
-        <h2 className="mb-2 text-2xl font-bold">Order not found</h2>
-        <p className="mb-4 text-muted-foreground">
-          The order you're looking for doesn't exist.
-        </p>
-        <Button asChild>
-          <Link to="/orders">View All Orders</Link>
+      <div className="container py-12 text-center">
+        <Package className="mx-auto h-16 w-16 text-muted-foreground/40" />
+        <h2 className="text-xl font-semibold mt-4">Order not found</h2>
+        <Button asChild className="mt-4">
+          <Link to="/orders">View Orders</Link>
         </Button>
       </div>
     );
   }
 
+  /* ---------- UI ---------- */
+
   return (
     <div className="container py-8">
-      <Button
-        variant="ghost"
-        className="mb-6"
-        onClick={() => navigate('/orders')}
-      >
+
+      <Button variant="ghost" onClick={() => navigate('/orders')}>
         <ArrowLeft className="mr-2 h-4 w-4" />
-        Back to Orders
+        Back
       </Button>
 
-      {/* Order Header */}
-      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      {/* HEADER */}
+      <div className="flex justify-between items-center mt-6 mb-6">
         <div>
-          <div className="mb-1 flex items-center gap-3">
-            <h1 className="text-2xl font-bold">Order #{order.orderNumber}</h1>
-            <Badge className={statusColors[order.status]}>
-              {statusLabels[order.status]}
-            </Badge>
-          </div>
-          <p className="text-muted-foreground">
-            Placed on {format(new Date(order.createdAt), 'MMMM d, yyyy at h:mm a')}
-          </p>
+          <h1 className="text-2xl font-bold mb-2">
+            Order #{order.orderNumber}
+          </h1>
+
+          <Badge className={statusColors[order.status]}>
+            {statusLabels[order.status]}
+          </Badge>
         </div>
-        {canCancel && (
+
+        {canCancel && !needsPayment && (
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button variant="destructive">Cancel Order</Button>
             </AlertDialogTrigger>
+
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Cancel this order?</AlertDialogTitle>
+                <AlertDialogTitle>Cancel Order</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Please provide a reason for cancellation. This action cannot be undone.
+                  Provide cancellation reason
                 </AlertDialogDescription>
               </AlertDialogHeader>
+
               <Textarea
-                placeholder="Why are you cancelling this order?"
                 value={cancelReason}
                 onChange={(e) => setCancelReason(e.target.value)}
-                className="mt-2"
+                placeholder="Enter reason for cancellation..."
               />
+
               <AlertDialogFooter>
-                <AlertDialogCancel>Keep Order</AlertDialogCancel>
+                <AlertDialogCancel>Close</AlertDialogCancel>
+
                 <AlertDialogAction
                   onClick={handleCancel}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   disabled={isCancelling}
                 >
-                  {isCancelling && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
-                  Cancel Order
+                  {isCancelling && <Loader2 className="animate-spin mr-2 h-4 w-4" />}
+                  Confirm
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
@@ -269,206 +504,318 @@ export default function OrderDetail() {
         )}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Main Content */}
-        <div className="space-y-6 lg:col-span-2">
-          {/* Status Timeline */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Order Status</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <StatusTimeline currentStatus={order.status} />
-            </CardContent>
-          </Card>
-
-          {/* Restaurant Info */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Restaurant</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-lg bg-primary/10">
-                  <UtensilsCrossed className="h-7 w-7 text-primary" />
-                </div>
+      {/* PAYMENT PENDING ALERT */}
+      {needsPayment && (
+        <Card className="mb-6 border-warning bg-warning/10">
+          <CardContent className="pt-6">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <Clock className="mt-0.5 h-5 w-5 text-warning" />
                 <div>
-                  <p className="font-semibold text-lg">
-                    {order.restaurant?.name || 'Restaurant'}
+                  <h3 className="font-semibold">Payment Pending</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Your order is waiting for payment. Complete payment to confirm your order.
                   </p>
-                  {order.restaurant?.address && (
-                    <p className="text-sm text-muted-foreground flex items-center gap-1">
-                      <MapPin className="h-3 w-3" />
-                      {order.restaurant.address}
-                    </p>
-                  )}
-                  {order.restaurant?.phone && (
-                    <p className="text-sm text-muted-foreground flex items-center gap-1">
-                      <Phone className="h-3 w-3" />
-                      {order.restaurant.phone}
-                    </p>
-                  )}
                 </div>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* Order Items */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Order Items</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {order.items?.map((item) => (
-                  <div
-                    key={item.menuItem._id}
-                    className="flex items-center justify-between"
+              <div className="flex gap-2 shrink-0">
+                {order.paymentMethod === 'upi' && (
+                  <Button
+                    onClick={generateUPIQR}
+                    variant="outline"
+                    disabled={isProcessingPayment}
                   >
-                    <div className="flex items-center gap-4">
-                      <div className="h-14 w-14 flex-shrink-0 overflow-hidden rounded-lg bg-muted">
-                        {item.menuItem.image ? (
-                          <img
-                            src={item.menuItem.image}
-                            alt={item.menuItem.name}
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center">
-                            <UtensilsCrossed className="h-6 w-6 text-muted-foreground/50" />
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <p className="font-medium">{item.menuItem.name}</p>
-                        <p className="text-sm text-muted-foreground">
-                          ${item.menuItem.price.toFixed(2)} × {item.quantity}
-                        </p>
-                      </div>
-                    </div>
-                    <span className="font-semibold">
-                      ${(item.menuItem.price * item.quantity).toFixed(2)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Sidebar */}
-        <div className="space-y-6">
-          {/* Delivery Address */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <MapPin className="h-5 w-5" />
-                Delivery Address
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-muted-foreground">
-                {order.deliveryAddress?.street}
-                <br />
-                {order.deliveryAddress?.city}, {order.deliveryAddress?.state}{' '}
-                {order.deliveryAddress?.zipCode}
-              </p>
-            </CardContent>
-          </Card>
-
-          {/* Payment Info */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <CreditCard className="h-5 w-5" />
-                Payment
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Method</span>
-                <span className="capitalize">{order.paymentMethod}</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Status</span>
-                <Badge
-                  variant={order.paymentStatus === 'paid' ? 'default' : 'secondary'}
-                  className={
-                    order.paymentStatus === 'paid' ? 'bg-success' : ''
-                  }
+                    <QrCodeIcon className="mr-2 h-4 w-4" />
+                    Show QR
+                  </Button>
+                )}
+                <Button
+                  onClick={handlePayNow}
+                  disabled={isProcessingPayment}
                 >
-                  {order.paymentStatus}
-                </Badge>
+                  {isProcessingPayment && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Pay Now
+                </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-          {/* Order Summary */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Order Summary</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
+      {/* UPI QR CODE DIALOG */}
+      <Dialog open={showQRDialog} onOpenChange={setShowQRDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Scan QR to Pay</DialogTitle>
+            <DialogDescription>
+              Scan this QR code with any UPI app to complete payment
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="flex flex-col items-center space-y-4">
+            {qrCodeUrl && (
+              <img 
+                src={qrCodeUrl} 
+                alt="UPI QR Code" 
+                className="w-64 h-64 border-2 border-gray-300 rounded-lg"
+              />
+            )}
+            
+            <div className="w-full space-y-2">
+              <p className="text-center text-lg font-semibold">
+                Amount: ₹{order.totalAmount.toFixed(2)}
+              </p>
+              
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={upiLink}
+                  readOnly
+                  className="flex-1 px-3 py-2 text-sm border rounded bg-muted"
+                />
+                <Button onClick={copyUPILink} size="sm">
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+              
+              <p className="text-xs text-center text-muted-foreground">
+                After payment, please wait for confirmation or contact support
+              </p>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* STATUS */}
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle>Order Status</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <StatusTimeline currentStatus={order.status} />
+        </CardContent>
+      </Card>
+
+      {/* REST OF THE COMPONENT - SAME AS BEFORE */}
+      {/* (Restaurant, Address, Items, Payment Summary sections remain the same) */}
+
+      {/* RESTAURANT */}
+      {order.restaurant && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <UtensilsCrossed className="h-5 w-5" />
+              Restaurant
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-4">
+              {order.restaurant.image && (
+                <img
+                  src={order.restaurant.image}
+                  alt={order.restaurant.name}
+                  className="h-16 w-16 rounded-lg object-cover"
+                />
+              )}
+              <div>
+                <p className="font-semibold">
+                  {order.restaurant.name}
+                </p>
+                {order.restaurant.phone && (
+                  <p className="text-sm flex items-center gap-2 text-muted-foreground">
+                    <Phone className="h-4 w-4" /> 
+                    {order.restaurant.phone}
+                  </p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* DELIVERY ADDRESS */}
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <MapPin className="h-5 w-5" />
+            Delivery Address
+          </CardTitle>
+        </CardHeader>
+
+        <CardContent>
+          <p className="text-sm">
+            {formattedAddress}
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* ITEMS */}
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle>Order Items</CardTitle>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          {order.items?.map((item: any, index: number) => (
+            <div key={item.menuItem?._id || index}>
+              {index > 0 && <Separator className="my-4" />}
+              <div className="flex items-center justify-between gap-4">
+                {item.menuItem?.image && (
+                  <img
+                    src={item.menuItem.image}
+                    alt={item.name || item.menuItem.name}
+                    className="h-16 w-16 rounded-lg object-cover"
+                  />
+                )}
+                <div className="flex-1">
+                  <p className="font-semibold">
+                    {item.name || item.menuItem?.name || 'Item'}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    ₹{item.price?.toFixed(2)} × {item.quantity}
+                  </p>
+                </div>
+                <p className="font-semibold">
+                  ₹{((item.price || 0) * item.quantity).toFixed(2)}
+                </p>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      {/* PAYMENT & SUMMARY */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <CreditCard className="h-5 w-5" />
+            Payment Summary
+          </CardTitle>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          {/* Payment Method & Status */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Payment Method</span>
+              <span className="font-medium">
+                {paymentMethodLabels[order.paymentMethod] || order.paymentMethod}
+              </span>
+            </div>
+            
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Payment Status</span>
+              <Badge
+                variant={isPaymentCompleted(order.paymentStatus) ? 'default' : 'secondary'}
+                className={isPaymentCompleted(order.paymentStatus) ? 'bg-success' : ''}
+              >
+                {isPaymentCompleted(order.paymentStatus) ? (
+                  <CheckCircle className="mr-1 h-3 w-3" />
+                ) : (
+                  <Clock className="mr-1 h-3 w-3" />
+                )}
+                {order.paymentStatus}
+              </Badge>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Price Breakdown */}
+          <div className="space-y-2">
+            {order.subtotal !== undefined && (
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Subtotal</span>
-                <span>
-                  $
-                  {(
-                    order.totalAmount -
-                    (order.restaurant?.deliveryFee || 0) -
-                    order.totalAmount * 0.08
-                  ).toFixed(2)}
-                </span>
+                <span>₹{order.subtotal.toFixed(2)}</span>
               </div>
+            )}
+            
+            {order.deliveryFee !== undefined && (
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Delivery Fee</span>
-                <span>${order.restaurant?.deliveryFee?.toFixed(2) || '0.00'}</span>
+                <span>₹{order.deliveryFee.toFixed(2)}</span>
               </div>
+            )}
+            
+            {order.tax !== undefined && (
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Tax</span>
-                <span>${(order.totalAmount * 0.08).toFixed(2)}</span>
+                <span>₹{order.tax.toFixed(2)}</span>
               </div>
+            )}
+            
+            <Separator />
+            
+            <div className="flex justify-between font-bold text-lg">
+              <span>Total</span>
+              <span className="text-primary">
+                ₹{order.totalAmount.toFixed(2)}
+              </span>
+            </div>
+          </div>
+
+          {/* Pay Now Button (if payment needed) */}
+          {needsPayment && (
+            <>
               <Separator />
-              <div className="flex justify-between font-semibold">
-                <span>Total</span>
-                <span className="text-lg text-primary">
-                  ${order.totalAmount.toFixed(2)}
-                </span>
+              <div className="space-y-2">
+                <Button
+                  onClick={handlePayNow}
+                  disabled={isProcessingPayment}
+                  className="w-full"
+                  size="lg"
+                >
+                  {isProcessingPayment && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  <CreditCard className="mr-2 h-4 w-4" />
+                  Pay ₹{order.totalAmount.toFixed(2)}
+                </Button>
+                
+                {order.paymentMethod === 'upi' && (
+                  <Button
+                    onClick={generateUPIQR}
+                    variant="outline"
+                    className="w-full"
+                    size="lg"
+                  >
+                    <QrCodeIcon className="mr-2 h-4 w-4" />
+                    Generate UPI QR Code
+                  </Button>
+                )}
               </div>
-            </CardContent>
-          </Card>
+            </>
+          )}
+
+          {/* Estimated Delivery */}
+          {order.estimatedDeliveryTime && (
+            <>
+              <Separator />
+              <div className="rounded-lg bg-muted/50 p-3">
+                <div className="flex items-center gap-2 text-sm">
+                  <Clock className="h-4 w-4 text-primary" />
+                  <span className="text-muted-foreground">Estimated Delivery</span>
+                </div>
+                <p className="mt-1 font-medium">
+                  {format(new Date(order.estimatedDeliveryTime), 'MMM d, h:mm a')}
+                </p>
+              </div>
+            </>
+          )}
 
           {/* Special Instructions */}
           {order.specialInstructions && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Special Instructions</CardTitle>
-              </CardHeader>
-              <CardContent>
+            <>
+              <Separator />
+              <div className="rounded-lg bg-muted/50 p-3">
+                <p className="text-sm font-medium mb-1">Special Instructions</p>
                 <p className="text-sm text-muted-foreground">
                   {order.specialInstructions}
                 </p>
-              </CardContent>
-            </Card>
+              </div>
+            </>
           )}
+        </CardContent>
+      </Card>
 
-          {/* Cancellation Reason */}
-          {order.status === 'cancelled' && order.cancelReason && (
-            <Card className="border-destructive">
-              <CardHeader>
-                <CardTitle className="text-destructive">
-                  Cancellation Reason
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  {order.cancelReason}
-                </p>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

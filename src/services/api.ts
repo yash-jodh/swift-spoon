@@ -139,14 +139,19 @@ export const cartApi = {
     return handleResponse<CartResponse>(response);
   },
 
-  addItem: async (menuItemId: string, quantity: number = 1): Promise<CartResponse> => {
-    const response = await fetch(`${API_BASE_URL}/cart/add`, {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ menuItemId, quantity }),
-    });
-    return handleResponse<CartResponse>(response);
-  },
+ addItem: async (
+  menuItemId: string,
+  quantity: number = 1
+): Promise<CartResponse> => {
+  const response = await fetch(`${API_BASE_URL}/cart/add`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ menuItemId, quantity }),
+  });
+
+  return handleResponse<CartResponse>(response);
+},
+
 
   updateItem: async (itemId: string, quantity: number): Promise<CartResponse> => {
     const response = await fetch(`${API_BASE_URL}/cart/item/${itemId}`, {
@@ -166,7 +171,7 @@ export const cartApi = {
   },
 
   clear: async (): Promise<{ success: boolean }> => {
-    const response = await fetch(`${API_BASE_URL}/cart/clear`, {
+    const response = await fetch(`${API_BASE_URL}/cart`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
     });

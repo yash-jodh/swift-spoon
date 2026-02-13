@@ -19,10 +19,11 @@ import OrderDetail from "./pages/OrderDetail";
 import Profile from "./pages/Profile";
 import NotFound from "./pages/NotFound";
 
+
 const queryClient = new QueryClient();
 
 const App = () => (
-  <QueryClientProvider client={queryClient}>
+  <QueryClientProvider client={queryClient}> 
     <AuthProvider>
       <CartProvider>
         <TooltipProvider>
@@ -85,5 +86,6 @@ const App = () => (
     </AuthProvider>
   </QueryClientProvider>
 );
+
 
 export default App;

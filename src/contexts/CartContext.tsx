@@ -1,182 +1,131 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import type { Cart, CartSummary, MenuItem } from '@/types';
 import { cartApi } from '@/services/api';
 import { useAuth } from './AuthContext';
 import { useToast } from '@/hooks/use-toast';
 
-interface CartContextType {
-  cart: Cart | null;
-  summary: CartSummary | null;
-  itemCount: number;
-  isLoading: boolean;
-  addItem: (item: MenuItem, quantity?: number) => Promise<void>;
-  updateItemQuantity: (itemId: string, quantity: number) => Promise<void>;
-  removeItem: (itemId: string) => Promise<void>;
-  clearCart: () => Promise<void>;
-  refreshCart: () => Promise<void>;
-}
+const CartContext = createContext(undefined);
 
-const CartContext = createContext<CartContextType | undefined>(undefined);
-
-export function CartProvider({ children }: { children: React.ReactNode }) {
-  const [cart, setCart] = useState<Cart | null>(null);
-  const [summary, setSummary] = useState<CartSummary | null>(null);
+export function CartProvider({ children }) {
+  const [cart, setCart] = useState(null);
+  const [summary, setSummary] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+
   const { isAuthenticated } = useAuth();
   const { toast } = useToast();
 
+  // ✅ REFRESH CART
   const refreshCart = useCallback(async () => {
-    if (!isAuthenticated) {
-      setCart(null);
-      setSummary(null);
-      return;
-    }
-
     try {
       setIsLoading(true);
+
       const response = await cartApi.get();
+
       if (response.success) {
         setCart(response.cart);
         setSummary(response.summary);
       }
+
     } catch (error) {
-      console.error('Failed to fetch cart:', error);
+      console.error("Cart fetch error", error);
     } finally {
       setIsLoading(false);
     }
-  }, [isAuthenticated]);
+  }, []);
 
+  // ✅ FIXED useEffect (MAIN BUG FIX)
   useEffect(() => {
-    refreshCart();
-  }, [refreshCart]);
+    if (isAuthenticated) {
+      refreshCart();
+    } else {
+      setCart(null);
+      setSummary(null);
+    }
+  }, [isAuthenticated]); // ❗ Removed refreshCart dependency
 
-  const addItem = useCallback(
-    async (item: MenuItem, quantity: number = 1) => {
-      if (!isAuthenticated) {
-        toast({
-          title: 'Please log in',
-          description: 'You need to log in to add items to cart',
-          variant: 'destructive',
-        });
-        return;
+  // ✅ ADD ITEM
+  const addItem = async (item, quantity = 1) => {
+  if (!isAuthenticated) {
+    toast({
+      title: "Login required",
+      description: "Please login first",
+      variant: "destructive"
+    });
+    return;
+  }
+
+  try {
+    const response = await cartApi.addItem(item._id, quantity);
+
+    if (response?.success) {
+      setCart(response.cart);
+
+      // ⭐ Since backend add route does NOT send summary
+      // Refresh cart to fetch updated summary
+      await refreshCart();
+
+      toast({
+        title: "Added to cart",
+        description: item.name
+      });
+    }
+
+  } catch (error) {
+    console.error("Add to cart error:", error);
+
+    toast({
+      title: "Error",
+      description:
+        error instanceof Error
+          ? error.message
+          : "Failed to add item to cart",
+      variant: "destructive"
+    });
+  }
+};
+
+
+  // ✅ UPDATE QUANTITY
+  const updateItemQuantity = async (itemId, quantity) => {
+    try {
+      const response = await cartApi.updateItem(itemId, quantity);
+
+      if (response.success) {
+        setCart(response.cart);
+        setSummary(response.summary);
       }
 
-      try {
-        // Optimistic update
-        setCart((prev) => {
-          if (!prev) {
-            return {
-              items: [{ menuItem: item, quantity }],
-              restaurant: null,
-            };
-          }
+    } catch {
+      toast({ title: "Update failed", variant: "destructive" });
+    }
+  };
 
-          const existingItemIndex = prev.items.findIndex(
-            (i) => i.menuItem._id === item._id
-          );
+  // ✅ REMOVE ITEM
+  const removeItem = async (itemId) => {
+    try {
+      const response = await cartApi.removeItem(itemId);
 
-          if (existingItemIndex >= 0) {
-            const newItems = [...prev.items];
-            newItems[existingItemIndex] = {
-              ...newItems[existingItemIndex],
-              quantity: newItems[existingItemIndex].quantity + quantity,
-            };
-            return { ...prev, items: newItems };
-          }
-
-          return {
-            ...prev,
-            items: [...prev.items, { menuItem: item, quantity }],
-          };
-        });
-
-        const response = await cartApi.addItem(item._id, quantity);
-        if (response.success) {
-          setCart(response.cart);
-          setSummary(response.summary);
-          toast({
-            title: 'Added to cart',
-            description: `${item.name} has been added to your cart`,
-          });
-        }
-      } catch (error) {
-        refreshCart();
-        toast({
-          title: 'Error',
-          description: 'Failed to add item to cart',
-          variant: 'destructive',
-        });
+      if (response.success) {
+        setCart(response.cart);
+        setSummary(response.summary);
       }
-    },
-    [isAuthenticated, toast, refreshCart]
-  );
 
-  const updateItemQuantity = useCallback(
-    async (itemId: string, quantity: number) => {
-      try {
-        if (quantity <= 0) {
-          await removeItem(itemId);
-          return;
-        }
+    } catch {
+      toast({ title: "Remove failed", variant: "destructive" });
+    }
+  };
 
-        const response = await cartApi.updateItem(itemId, quantity);
-        if (response.success) {
-          setCart(response.cart);
-          setSummary(response.summary);
-        }
-      } catch (error) {
-        toast({
-          title: 'Error',
-          description: 'Failed to update cart',
-          variant: 'destructive',
-        });
-      }
-    },
-    [toast]
-  );
-
-  const removeItem = useCallback(
-    async (itemId: string) => {
-      try {
-        const response = await cartApi.removeItem(itemId);
-        if (response.success) {
-          setCart(response.cart);
-          setSummary(response.summary);
-          toast({
-            title: 'Item removed',
-            description: 'Item has been removed from your cart',
-          });
-        }
-      } catch (error) {
-        toast({
-          title: 'Error',
-          description: 'Failed to remove item',
-          variant: 'destructive',
-        });
-      }
-    },
-    [toast]
-  );
-
-  const clearCart = useCallback(async () => {
+  // ✅ CLEAR CART
+  const clearCart = async () => {
     try {
       await cartApi.clear();
       setCart(null);
       setSummary(null);
-      toast({
-        title: 'Cart cleared',
-        description: 'All items have been removed from your cart',
-      });
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: 'Failed to clear cart',
-        variant: 'destructive',
-      });
+    } catch {
+      toast({ title: "Clear failed", variant: "destructive" });
     }
-  }, [toast]);
+  };
 
-  const itemCount = cart?.items.reduce((acc, item) => acc + item.quantity, 0) || 0;
+  const itemCount = cart?.items?.reduce((a, b) => a + b.quantity, 0) || 0;
 
   return (
     <CartContext.Provider
@@ -189,7 +138,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         updateItemQuantity,
         removeItem,
         clearCart,
-        refreshCart,
+        refreshCart
       }}
     >
       {children}
@@ -197,10 +146,4 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function useCart() {
-  const context = useContext(CartContext);
-  if (context === undefined) {
-    throw new Error('useCart must be used within a CartProvider');
-  }
-  return context;
-}
+export const useCart = () => useContext(CartContext);
