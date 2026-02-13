@@ -9,7 +9,10 @@ import type {
   DeliveryAddress,
 } from '@/types';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+// ✅ FIXED: Use environment variable with fallback
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+
+console.log('🔗 API Base URL:', API_BASE_URL); // For debugging
 
 // Helper function to get auth headers
 const getAuthHeaders = (): HeadersInit => {
@@ -139,19 +142,18 @@ export const cartApi = {
     return handleResponse<CartResponse>(response);
   },
 
- addItem: async (
-  menuItemId: string,
-  quantity: number = 1
-): Promise<CartResponse> => {
-  const response = await fetch(`${API_BASE_URL}/cart/add`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify({ menuItemId, quantity }),
-  });
+  addItem: async (
+    menuItemId: string,
+    quantity: number = 1
+  ): Promise<CartResponse> => {
+    const response = await fetch(`${API_BASE_URL}/cart/add`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ menuItemId, quantity }),
+    });
 
-  return handleResponse<CartResponse>(response);
-},
-
+    return handleResponse<CartResponse>(response);
+  },
 
   updateItem: async (itemId: string, quantity: number): Promise<CartResponse> => {
     const response = await fetch(`${API_BASE_URL}/cart/item/${itemId}`, {
