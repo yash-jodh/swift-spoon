@@ -51,6 +51,12 @@ import {
   Copy,
 } from 'lucide-react';
 
+/* ---------------- API BASE URL ---------------- */
+// ✅ FIXED: Use environment variable instead of hardcoded localhost
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+
+console.log('🔗 Payment API URL:', API_BASE_URL); // For debugging
+
 /* ---------------- STATUS CONFIG ---------------- */
 
 const statusSteps = [
@@ -266,8 +272,8 @@ export default function OrderDetail() {
 
       console.log('Creating payment order for:', order._id, 'Amount:', order.totalAmount);
 
-      // Create Razorpay order
-      const response = await fetch('http://localhost:5000/api/payment/create-order', {
+      // ✅ FIXED: Use API_BASE_URL instead of hardcoded localhost
+      const response = await fetch(`${API_BASE_URL}/payment/create-order`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -308,7 +314,8 @@ export default function OrderDetail() {
         handler: async (response: any) => {
           // Payment successful - verify on backend
           try {
-            const verifyResponse = await fetch('http://localhost:5000/api/payment/verify', {
+            // ✅ FIXED: Use API_BASE_URL for verify endpoint too
+            const verifyResponse = await fetch(`${API_BASE_URL}/payment/verify`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -595,9 +602,6 @@ export default function OrderDetail() {
           <StatusTimeline currentStatus={order.status} />
         </CardContent>
       </Card>
-
-      {/* REST OF THE COMPONENT - SAME AS BEFORE */}
-      {/* (Restaurant, Address, Items, Payment Summary sections remain the same) */}
 
       {/* RESTAURANT */}
       {order.restaurant && (
