@@ -476,7 +476,7 @@ export default function LandingPage3D() {
           <div className="relative z-10">
 
             <h2 className="text-4xl md:text-5xl font-black text-white mb-6">
-              Why Choose Swift Spoon?
+              Why Choose FoodDash?
             </h2>
 
             <p className="text-xl text-white/90 mb-16 max-w-2xl mx-auto">
