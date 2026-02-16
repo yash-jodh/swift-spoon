@@ -151,7 +151,7 @@ export default function Home() {
       <section className="py-16">
         <div className="container">
           <h2 className="text-center text-3xl font-bold mb-10">
-            Why Choose Swift Spoon?
+            Why Choose FoodDash?
           </h2>
 
           <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
